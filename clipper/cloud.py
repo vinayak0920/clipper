@@ -26,7 +26,12 @@ class OutOfCredits(Exception):
 
 
 def url() -> str:
-    return (os.getenv("CLIPPER_CLOUD_URL") or DEFAULT_URL).rstrip("/")
+    # Only a real http(s) address counts. Anything else (a browser autofilling
+    # a street address into the field, say) falls back to Apavin's server.
+    v = (os.getenv("CLIPPER_CLOUD_URL") or "").strip()
+    if not v.startswith(("https://", "http://")) or " " in v:
+        v = DEFAULT_URL
+    return v.rstrip("/")
 
 
 def token() -> str:

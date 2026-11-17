@@ -71,7 +71,7 @@ SCHEMA = [
         {"key": "SHOW_TITLE", "label": "Hook bar on clips", "kind": "toggle", "default": "1"},
     ]},
     {"group": "advanced", "title": "Advanced", "about": "Only change this if you run your own Clipper Cloud server.", "fields": [
-        {"key": "CLIPPER_CLOUD_URL", "label": "Clipper Cloud address", "kind": "text", "placeholder": "https://apavin.com/api/clipper"},
+        {"key": "CLIPPER_CLOUD_URL", "label": "Clipper Cloud URL", "kind": "text", "placeholder": "https://apavin.com/api/clipper"},
     ]},
 ]
 FIELDS = {f["key"]: f for g in SCHEMA for f in g["fields"]}
@@ -148,6 +148,8 @@ def save_settings(req: SaveReq):
             except ValueError:
                 raise HTTPException(400, f"{f['label']} must be a number")
             v = str(min(max(num, f.get("min", num)), f.get("max", num)))
+        if k == "CLIPPER_CLOUD_URL" and v and (not v.startswith(("https://", "http://")) or " " in v):
+            raise HTTPException(400, "Clipper Cloud URL must start with https://, or leave it empty")
         updates[k] = v
     write_env(updates)
     settings.reload()
@@ -255,7 +257,7 @@ async def account_token(req: TokenReq):
 def auth_callback():
     # The token is in the URL fragment, which only this page's script can read.
     return """<!doctype html><meta charset=utf-8><title>Signing in</title>
-<body style="font:16px system-ui;background:#1A1917;color:#F2EEE6;display:grid;place-items:center;height:100vh;margin:0">
+<body style="font:16px system-ui;background:#fffcf5;color:#111;display:grid;place-items:center;height:100vh;margin:0">
 <p id=m>Signing you in...</p>
 <script>
 const h = new URLSearchParams(location.hash.slice(1));
