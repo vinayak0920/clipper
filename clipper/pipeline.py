@@ -11,9 +11,13 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
+import sys
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import llm, reframe
@@ -33,8 +37,44 @@ def _model():
         if device == "auto":
             device = "cuda" if _has_cuda() else "cpu"
         _whisper = WhisperModel(settings.whisper_model, device=device,
-                                compute_type="float16" if device == "cuda" else "int8")
+                                compute_type="float16" if device == "cuda" else "int8",
+                                cpu_threads=os.cpu_count() or 4)
     return _whisper
+
+
+def warm_up():
+    """Loads Whisper in the background at startup, so the first clip doesn't pay for it."""
+    def go():
+        try:
+            with _model_lock:
+                _model()
+            log.info("whisper %s loaded", settings.whisper_model)
+        except Exception as e:
+            log.warning("whisper preload failed: %s", e)
+    threading.Thread(target=go, daemon=True, name="whisper-preload").start()
+
+
+_model_lock = threading.Lock()
+_side = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip-side")
+
+
+_encoder = None
+
+
+def video_encoder() -> list[str]:
+    """Apple's hardware H.264 encoder on Macs (several times faster than x264), x264 elsewhere."""
+    global _encoder
+    if _encoder is None:
+        _encoder = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+        if sys.platform == "darwin" and os.getenv("HW_ENCODE", "1") == "1":
+            try:
+                out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
+                if "h264_videotoolbox" in out:
+                    _encoder = ["-c:v", "h264_videotoolbox", "-b:v", "9M", "-maxrate", "12M", "-bufsize", "18M",
+                                "-profile:v", "high", "-allow_sw", "1"]
+            except Exception:
+                pass
+    return _encoder
 
 
 def reset_model():
@@ -66,9 +106,11 @@ def probe_duration(path: Path) -> float:
 
 
 def transcribe(audio: Path) -> tuple[list[Word], str]:
-    segments, info = _model().transcribe(
+    with _model_lock:
+        model = _model()
+    segments, info = model.transcribe(
         str(audio), word_timestamps=True, vad_filter=True,
-        language=settings.caption_language or None, beam_size=5,
+        language=settings.caption_language or None, beam_size=1,
         condition_on_previous_text=False,
     )
     words = []
@@ -92,27 +134,47 @@ def tighten(words: list[Word], duration: float) -> tuple[float, float]:
     return start, min(end, start + settings.max_clip)
 
 
-def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: bool = False) -> dict | None:
-    status = on_status or (lambda s: None)
+def cut(moment: Moment, recorder) -> dict:
+    """Copies the buffered video around a moment into its own folder. Cheap; done before
+    the clip waits in the render queue, so the rolling buffer can't drop it meanwhile."""
     cid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
     out_dir = settings.clips_dir / cid
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. window: some setup before chat reacted, a bit of reaction after
     win_start = moment.start - settings.pre_roll
     win_end = moment.end + settings.post_roll
     if win_end - win_start > settings.max_clip + 10:
         win_start = win_end - (settings.max_clip + 10)
-    wait = win_end + settings.segment_seconds * 1.5 - time.time()
-    if wait > 0:
-        time.sleep(wait)                     # let the reaction finish recording
-    status("cutting")
     raw = out_dir / "raw.ts"
-    offset = recorder.extract(win_start, win_end, raw)
+    try:
+        offset = recorder.extract(win_start, win_end, raw)
+    except Exception:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     duration = win_end - win_start
     avail = probe_duration(raw) - offset
     if avail > 0:
         duration = min(duration, avail)
+    return {"cid": cid, "out_dir": out_dir, "raw": raw, "offset": offset, "duration": duration, "win_start": win_start}
+
+
+def ready_at(moment: Moment) -> float:
+    """Wall-clock time when the reaction after a moment has finished recording."""
+    return moment.end + settings.post_roll + settings.segment_seconds * 1.5
+
+
+def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: bool = False, piece: dict | None = None) -> dict | None:
+    status = on_status or (lambda s: None)
+    if piece is None:
+        wait = ready_at(moment) - time.time()
+        if wait > 0:
+            time.sleep(wait)
+        status("cutting")
+        piece = cut(moment, recorder)
+    cid, out_dir, raw = piece["cid"], piece["out_dir"], piece["raw"]
+    offset, duration, win_start = piece["offset"], piece["duration"], piece["win_start"]
+
+    # face framing runs alongside transcription; it only needs the video
+    layout_job = _side.submit(reframe.analyze, raw, offset, min(duration, 40))
 
     # 2. transcribe the window
     status("transcribing")
@@ -151,7 +213,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
 
     # 4. layout
     status("framing")
-    layout = reframe.analyze(raw, start=offset + start, duration=min(end - start, 30))
+    layout = layout_job.result()
 
     # 5. captions + render
     status("rendering")
@@ -169,7 +231,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
         "ffmpeg", "-y", "-loglevel", "error",
         "-ss", f"{offset + start:.2f}", "-i", "raw.ts", "-t", f"{end - start:.2f}",
         "-filter_complex", graph, "-map", "[vout]", "-map", "0:a:0?",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-r", "30", "-pix_fmt", "yuv420p",
+        *video_encoder(), "-r", "30", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "160k", "-af", "asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11",
         "-movflags", "+faststart", "clip.mp4",
     ], cwd=out_dir)

@@ -423,6 +423,11 @@ def stats():
     }
 
 
+@app.on_event("startup")
+async def startup():
+    pipeline.warm_up()
+
+
 @app.on_event("shutdown")
 async def shutdown():
     await manager.stop_all()

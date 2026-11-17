@@ -75,17 +75,36 @@ class Monitor:
         self.jobs = self.jobs[-20:]
         meta = {"platform": self.platform, "channel": self.channel, "name": self.name}
 
-        def work():
+        loop = asyncio.get_running_loop()
+
+        async def prepare():
+            # wait for the reaction to finish recording outside the render queue,
+            # so one clip's wait never holds up another clip's render
+            wait = pipeline.ready_at(m) - time.time()
+            if wait > 0:
+                job["status"] = "recording the reaction"
+                await asyncio.sleep(wait)
+            job["status"] = "cutting"
+            try:
+                piece = await asyncio.to_thread(pipeline.cut, m, self.recorder)
+            except Exception as e:
+                log.warning("cut failed: %s", e)
+                job["status"] = f"error: {e}"[:200]
+                return
+            job["status"] = "queued"
+            loop.run_in_executor(WORKER, lambda: work(piece))
+
+        def work(piece):
             try:
                 job["clip"] = pipeline.make_clip(m, self.recorder, meta, on_status=lambda s: job.update(status=s),
-                                                 force_keep=manual)
+                                                 force_keep=manual, piece=piece)
                 if job["clip"] is None and not job["status"].startswith("dropped"):
                     job["status"] = "dropped"
             except Exception as e:
                 log.exception("clip failed")
                 job["status"] = f"error: {e}"[:200]
 
-        asyncio.get_running_loop().run_in_executor(WORKER, work)
+        loop.create_task(prepare())
 
     def manual_clip(self, seconds: float = 30):
         """'Clip that' button: last `seconds` of video plus a few seconds after the click."""

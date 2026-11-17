@@ -74,42 +74,47 @@ def _detector(w: int, h: int):
     return ("haar", cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"))
 
 
+def _sample_frames(video: Path, start: float, duration: float, samples: int, sw: int, sh: int):
+    """Small BGR frames spread over the window, decoded by ffmpeg with a fast seek
+    instead of reading every frame from the start of the file."""
+    import subprocess
+    import numpy as np
+    rate = samples / max(duration, 1.0)
+    cmd = ["ffmpeg", "-v", "error", "-ss", f"{start:.2f}", "-i", str(video), "-t", f"{duration:.2f}", "-an",
+           "-vf", f"fps={rate:.4f},scale={sw}:{sh}", "-frames:v", str(samples),
+           "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    out = subprocess.run(cmd, capture_output=True, timeout=60).stdout
+    size = sw * sh * 3
+    return [np.frombuffer(out[i:i + size], np.uint8).reshape(sh, sw, 3) for i in range(0, len(out) - size + 1, size)]
+
+
 def analyze(video: Path, start: float = 0.0, duration: float = 30.0, samples: int = 14) -> Layout:
     cap = cv2.VideoCapture(str(video))
     W = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or 1280
     H = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 720
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    scale = 640 / W
-    sw, sh = 640, int(H * scale)
-    kind, det = _detector(sw, sh)
-
-    first = int(start * fps)
-    step = max(1, int(duration * fps / samples))
-    faces, idx, seen = [], 0, 0
-    while seen < samples:
-        ok = cap.grab()
-        if not ok:
-            break
-        if idx >= first and (idx - first) % step == 0:
-            ok, frame = cap.retrieve()
-            if not ok:
-                break
-            seen += 1
-            small = cv2.resize(frame, (sw, sh))
-            found = []
-            if kind == "yunet":
-                _, res = det.detect(small)
-                if res is not None:
-                    found = [tuple(r[:4]) for r in res]
-            else:
-                gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                found = [tuple(r) for r in det.detectMultiScale(gray, 1.1, 6, minSize=(24, 24))]
-            if found:
-                x, y, w, h = max(found, key=lambda r: r[2] * r[3])
-                faces.append((x / scale, y / scale, w / scale, h / scale))
-        idx += 1
     cap.release()
-    return choose_layout(W, H, faces, seen)
+    scale = 640 / W
+    sw, sh = 640, int(H * scale) // 2 * 2
+    kind, det = _detector(sw, sh)
+    try:
+        frames = _sample_frames(video, start, duration, samples, sw, sh)
+    except Exception as e:
+        log.warning("frame sampling failed: %s", e)
+        frames = []
+    faces = []
+    for small in frames:
+        found = []
+        if kind == "yunet":
+            _, res = det.detect(small)
+            if res is not None:
+                found = [tuple(r[:4]) for r in res]
+        else:
+            gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+            found = [tuple(r) for r in det.detectMultiScale(gray, 1.1, 6, minSize=(24, 24))]
+        if found:
+            x, y, w, h = max(found, key=lambda r: r[2] * r[3])
+            faces.append((x / scale, y / scale, w / scale, h / scale))
+    return choose_layout(W, H, faces, len(frames))
 
 
 def choose_layout(W: int, H: int, faces: list[tuple], sampled: int) -> Layout:
