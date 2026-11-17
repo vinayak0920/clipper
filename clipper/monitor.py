@@ -1,0 +1,152 @@
+"""One Monitor per streamer: recorder + chat listener + detector. A shared worker renders clips."""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+from . import discovery, pipeline
+from .chat import kick_chat, twitch_chat
+from .config import settings
+from .detector import Detector, Moment
+from .recorder import Recorder
+
+log = logging.getLogger("monitor")
+# whisper + ffmpeg are heavy: render one clip at a time, queue the rest
+WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+
+
+class Monitor:
+    def __init__(self, platform: str, channel: str, name: str = "", sensitivity: float | None = None):
+        self.platform = platform
+        self.channel = channel.strip().lower().lstrip("@")
+        self.name = name or channel
+        self.key = f"{platform}:{self.channel}"
+        self.detector = Detector(
+            sensitivity=sensitivity or settings.sensitivity,
+            warmup=settings.warmup_seconds,
+            cooldown=settings.cooldown_seconds,
+        )
+        self.recorder = Recorder(platform, self.channel)
+        self.stop_evt = asyncio.Event()
+        self.tasks: list[asyncio.Task] = []
+        self.started = time.time()
+        self.msg_count = 0
+        self.moments: list[dict] = []
+        self.jobs: list[dict] = []
+        self.error = ""
+
+    def on_message(self, ts: float, user: str, text: str):
+        self.msg_count += 1
+        self.detector.add(ts, text)
+
+    async def start(self):
+        self.recorder.start()
+        if self.platform == "twitch":
+            self.tasks.append(asyncio.create_task(twitch_chat(self.channel, self.on_message, self.stop_evt)))
+        else:
+            try:
+                info = await asyncio.to_thread(discovery.kick_channel_info, self.channel)
+                if not info.get("channel_id"):
+                    raise RuntimeError("channel not found")
+                self.tasks.append(asyncio.create_task(kick_chat(info["channel_id"], self.on_message, self.stop_evt)))
+            except Exception as e:
+                self.error = f"Kick chat unavailable: {e}"
+                log.warning("%s: %s", self.key, self.error)
+        self.tasks.append(asyncio.create_task(self._loop()))
+
+    async def _loop(self):
+        while not self.stop_evt.is_set():
+            await asyncio.sleep(1)
+            m = self.detector.tick()
+            if not m:
+                continue
+            if not self.recorder.is_recording():
+                log.info("%s: moment found but stream isn't recording, skipped", self.key)
+                continue
+            log.info("%s: moment score=%.1f rate=%.1f/s base=%.2f %s", self.key, m.score, m.rate, m.baseline, m.keywords)
+            self.submit(m)
+
+    def submit(self, m: Moment, manual: bool = False):
+        job = {"at": m.peak, "score": m.score, "status": "queued", "clip": None,
+               "keywords": m.keywords, "manual": manual}
+        self.jobs.append(job)
+        self.jobs = self.jobs[-20:]
+        meta = {"platform": self.platform, "channel": self.channel, "name": self.name}
+
+        def work():
+            try:
+                job["clip"] = pipeline.make_clip(m, self.recorder, meta, on_status=lambda s: job.update(status=s),
+                                                 force_keep=manual)
+                if job["clip"] is None and not job["status"].startswith("dropped"):
+                    job["status"] = "dropped"
+            except Exception as e:
+                log.exception("clip failed")
+                job["status"] = f"error: {e}"[:200]
+
+        asyncio.get_running_loop().run_in_executor(WORKER, work)
+
+    def manual_clip(self, seconds: float = 30):
+        """'Clip that' button: last `seconds` of video plus a few seconds after the click."""
+        now = time.time()
+        start = now - max(5.0, seconds - settings.pre_roll)
+        recent = [t for _, t, _ in list(self.detector.msgs)[-40:]]
+        m = Moment(start=start, peak=now, end=now, score=0, rate=0,
+                   baseline=round(self.detector.baseline or 0, 2), top_messages=recent[-10:], keywords=["manual"])
+        self.submit(m, manual=True)
+
+    async def stop(self):
+        self.stop_evt.set()
+        self.recorder.stop()
+        for t in self.tasks:
+            t.cancel()
+
+    def status(self) -> dict:
+        d = self.detector
+        hist = list(d.history)[-90:]
+        return {
+            "key": self.key,
+            "platform": self.platform,
+            "channel": self.channel,
+            "name": self.name,
+            "uptime": int(time.time() - self.started),
+            "recording": self.recorder.is_recording(),
+            "buffered": int(self.recorder.buffered_seconds()),
+            "recorder_error": self.recorder.error if not self.recorder.is_recording() else "",
+            "chat_error": self.error,
+            "messages": self.msg_count,
+            "rate": hist[-1][1] if hist else 0,
+            "baseline": round(d.baseline or 0, 2),
+            "warm": time.time() - d.started >= d.warmup,
+            "sensitivity": d.sensitivity,
+            "spike_active": d.active is not None,
+            "history": [[h[1], h[2]] for h in hist],
+            "jobs": self.jobs[-8:],
+        }
+
+
+class Manager:
+    def __init__(self):
+        self.monitors: dict[str, Monitor] = {}
+
+    async def add(self, platform: str, channel: str, name: str = "", sensitivity: float | None = None) -> Monitor:
+        key = f"{platform}:{channel.strip().lower().lstrip('@')}"
+        if key in self.monitors:
+            return self.monitors[key]
+        m = Monitor(platform, channel, name, sensitivity)
+        self.monitors[key] = m
+        await m.start()
+        return m
+
+    async def remove(self, key: str):
+        m = self.monitors.pop(key, None)
+        if m:
+            await m.stop()
+
+    async def stop_all(self):
+        for k in list(self.monitors):
+            await self.remove(k)
+
+
+manager = Manager()
