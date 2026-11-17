@@ -54,6 +54,24 @@ def _req(method: str, path: str, auth: bool = True, timeout: float = 30, **kw):
 
 
 # ------------------------------------------------------------ account
+def login_url(return_url: str) -> str:
+    from urllib.parse import quote
+    return f"{url()}/v1/auth/google?return={quote(return_url, safe='')}"
+
+
+def save_token(token: str) -> dict | None:
+    """Keeps the token Google sign-in handed back, only after Clipper Cloud accepts it."""
+    try:
+        r = httpx.get(url() + "/v1/me", headers={"Authorization": f"Bearer {token}"}, timeout=10)
+    except httpx.HTTPError:
+        return None
+    if r.status_code != 200:
+        return None
+    write_env({"CLIPPER_TOKEN": token})
+    _me_cache.update(at=time.time(), data=r.json())
+    return r.json()
+
+
 def start_sign_in(email: str):
     return _req("POST", "/v1/auth/start", auth=False, json={"email": email})
 
@@ -86,6 +104,8 @@ def me(fresh: bool = False) -> dict | None:
 
 def hooks_left() -> int:
     m = me()
+    if m and m.get("unlimited"):
+        return 10**9
     return int(m["hooks_left"]) if m else 0
 
 

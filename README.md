@@ -2,7 +2,7 @@
 
 Open-source live clipper for **Twitch** and **Kick**. Choose streamers by country, and Clipper records them live, spots the moments chat loses it, and gives you vertical 9:16 clips with animated captions and a hook on top, ready for TikTok, Shorts and Reels.
 
-Recording, transcription and rendering all run on your own machine. Sign in with your email for Twitch listings and AI hooks with no keys at all, or bring your own key or Ollama and use it unlimited and offline. No watermark, ever.
+Recording, transcription and rendering all run on your own machine. Sign in with Google for Twitch listings and AI hooks with no keys at all, or bring your own key or Ollama and use it unlimited and offline. No watermark, ever.
 
 ## What it does
 
@@ -35,7 +35,7 @@ Linux works too: install `ffmpeg` and Python 3.10+, then run the same script. Wi
 
 ## Setup
 
-Open **Settings** in the dashboard and sign in with your email. That's all most people need: Twitch listings and 50 AI hooks a month are free, and Pro (₹300 a month) gives 3,000 hooks.
+Open **Settings** in the dashboard and sign in with Google. That's all most people need: Twitch listings and 50 AI hooks a month are free, and Pro (₹300 a month) gives 3,000 hooks.
 
 Prefer your own keys? Paste them, press **Save changes**, then **Test connection**. Each service gets a status light, and Ollama models can be downloaded from the same page. Everything is saved to `.env` on your computer, and the dashboard only answers requests addressed to localhost. None of the keys are required to clip a channel you add by name.
 

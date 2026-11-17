@@ -11,7 +11,7 @@ from typing import Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -23,6 +23,7 @@ from .regions import REGIONS
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 app = FastAPI(title="Clipper")
 app.mount("/clips", StaticFiles(directory=str(settings.clips_dir)), name="clips")
+app.mount("/ui", StaticFiles(directory=str(ROOT / "assets")), name="ui")
 STARTED = time.time()
 
 # ------------------------------------------------------------------ settings schema
@@ -227,6 +228,43 @@ async def account_verify(req: CodeReq):
     settings.reload()
     llm.reset()
     return {"ok": True, "me": me}
+
+
+@app.get("/api/account/login")
+def account_login(request: Request):
+    """Where "Continue with Google" goes: apavin.com, then back to /auth/callback on this computer."""
+    host = request.headers.get("host") or "localhost:8000"
+    return {"url": cloud.login_url(f"http://{host}/auth/callback")}
+
+
+class TokenReq(BaseModel):
+    token: str
+
+
+@app.post("/api/account/token")
+async def account_token(req: TokenReq):
+    me = await asyncio.to_thread(cloud.save_token, req.token.strip())
+    if not me:
+        raise HTTPException(400, "That sign-in didn't work. Try again.")
+    settings.reload()
+    llm.reset()
+    return {"ok": True, "me": me}
+
+
+@app.get("/auth/callback", response_class=HTMLResponse)
+def auth_callback():
+    # The token is in the URL fragment, which only this page's script can read.
+    return """<!doctype html><meta charset=utf-8><title>Signing in</title>
+<body style="font:16px system-ui;background:#1A1917;color:#F2EEE6;display:grid;place-items:center;height:100vh;margin:0">
+<p id=m>Signing you in...</p>
+<script>
+const h = new URLSearchParams(location.hash.slice(1));
+const t = h.get("clipper_token"), err = h.get("clipper_error");
+history.replaceState(null, "", "/auth/callback");
+if (!t) { document.getElementById("m").textContent = err || "Sign-in didn't finish."; setTimeout(() => location.href = "/#settings", 2500); }
+else fetch("/api/account/token", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({token: t})})
+  .then(r => { location.href = r.ok ? "/#settings" : "/#settings"; });
+</script>"""
 
 
 @app.post("/api/account/signout")
