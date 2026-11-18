@@ -384,7 +384,7 @@ def set_sensitivity(key: str, req: SensReq):
 
 
 @app.post("/api/monitors/{key}/clip")
-def clip_now(key: str, seconds: float = 30):
+async def clip_now(key: str, seconds: float = 30):
     m = manager.monitors.get(key)
     if not m:
         raise HTTPException(404)

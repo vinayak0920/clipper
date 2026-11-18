@@ -390,14 +390,14 @@ async function search() {
           <div class="t" title="${esc(s.title)}">${esc(s.title)}</div>
           <div class="v num">${fmt(s.viewers)} <em>watching ${esc(s.category)}</em></div>
         </div>
-        <button class="btn sm ${on ? "" : "cue"}" data-p="${esc(s.platform)}" data-c="${esc(s.channel)}" data-n="${esc(s.name)}" ${on ? "disabled" : ""}>${on ? "Watching" : "Watch"}</button>
+        <button class="btn sm ${on ? "" : "cue"}" data-p="${esc(s.platform)}" data-c="${esc(s.channel)}" data-n="${esc(s.name)}" data-cat="${esc(s.category || "")}" ${on ? "disabled" : ""}>${on ? "Watching" : "Watch"}</button>
       </div>`; }).join("");
-    $("#results").querySelectorAll("button[data-p]").forEach(b => b.onclick = async () => { b.disabled = true; b.textContent = "Watching"; b.classList.remove("cue"); await watch(b.dataset.p, b.dataset.c, b.dataset.n); });
+    $("#results").querySelectorAll("button[data-p]").forEach(b => b.onclick = async () => { b.disabled = true; b.textContent = "Watching"; b.classList.remove("cue"); await watch(b.dataset.p, b.dataset.c, b.dataset.n, b.dataset.cat); });
   } catch (e) { $("#results").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
 }
-async function watch(platform, channel, name) {
+async function watch(platform, channel, name, category = "") {
   if (!channel) return;
-  try { await api("/api/monitors", {method: "POST", body: JSON.stringify({platform, channel, name})}); toast(`Watching ${name || channel}`); $("#addName").value = ""; pollMonitors(); }
+  try { await api("/api/monitors", {method: "POST", body: JSON.stringify({platform, channel, name, category})}); toast(`Watching ${name || channel}`); $("#addName").value = ""; pollMonitors(); }
   catch (e) { toast(e.message); }
 }
 
@@ -444,7 +444,8 @@ async function pollMonitors() {
       const st = j.status, cls = st === "done" ? "done" : (st.startsWith("error") || st.startsWith("dropped") || st.startsWith("skipped")) ? "bad" : "";
       const time = new Date(j.at * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
       const label = st === "done" ? `Ready in ${j.took ?? "?"}s` : st.startsWith("dropped") ? "Skipped by AI" : st.startsWith("skipped") ? "Skipped, too many at once" : st.startsWith("error") ? "Failed" : st[0].toUpperCase() + st.slice(1) + "...";
-      return `<div class="job" title="${esc(st)}"><span class="num">${time}</span><span>${j.manual ? "Your clip" : "Chat spike " + j.score + "x"}</span><span class="s ${cls}">${label}</span></div>`;
+      const source = j.trigger === "talk_pause" ? "Talking while game paused" : j.manual ? "Your clip" : "Chat spike " + j.score + "x";
+      return `<div class="job" title="${esc(st)}"><span class="num">${time}</span><span>${source}</span><span class="s ${cls}">${label}</span></div>`;
     }).join("");
     draw(el.querySelector("canvas"), m.history, m.sensitivity);
   }
@@ -480,7 +481,7 @@ async function pollClips(force) {
       <div class="body">
         <div class="hook">${esc(c.title)}</div>
         <div class="who"><span class="badge ${c.platform}">${c.platform === "twitch" ? "Twitch" : "Kick"}</span><span>${esc(c.name)}</span><span class="num">${c.duration}s</span><span>${new Date(c.created * 1000).toLocaleString([], {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"})}</span></div>
-        <div class="chips">${c.score ? `<span class="chip cue">${c.score}x chat</span>` : `<span class="chip cue">Your clip</span>`}<span class="chip">${esc({split: "Cam + game", face: "Face crop", fill: "Blurred fill"}[c.layout] || c.layout)}</span>${(c.keywords || []).filter(k => k !== "manual").slice(0, 3).map(k => `<span class="chip">${esc(k)}</span>`).join("")}</div>
+        <div class="chips">${c.trigger === "talk_pause" ? `<span class="chip cue">Talking while game paused</span>` : c.score ? `<span class="chip cue">${c.score}x chat</span>` : `<span class="chip cue">Your clip</span>`}<span class="chip">${esc(c.layout_label || ({split: "Cam + game", face: "Face crop", fill: "Blurred fill"}[c.layout] || c.layout))}</span>${(c.category ? [`Game: ${c.category}`] : []).map(k => `<span class="chip">${esc(k)}</span>`).join("")}${(c.keywords || []).filter(k => k !== "manual" && k !== "talk_pause").slice(0, 3).map(k => `<span class="chip">${esc(k)}</span>`).join("")}</div>
         ${c.transcript ? `<details><summary>Transcript</summary><p>${esc(c.transcript)}</p></details>` : ""}
         <div class="acts"><a class="btn sm cue" href="${esc(c.video)}" download="${esc(c.channel)}-${esc(c.id)}.mp4">Download</a><button class="btn sm" data-copy="${esc(c.title)}">Copy hook</button><button class="btn sm ghost icon" data-del="${esc(c.id)}" aria-label="Delete clip" title="Delete clip"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button></div>
       </div>

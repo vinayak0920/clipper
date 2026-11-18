@@ -3,14 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from . import discovery, pipeline
 from .chat import kick_chat, twitch_chat
 from .config import settings
 from .detector import Detector, Moment
 from .recorder import Recorder
+from .talk_detector import detect as detect_talk_pause
 
 log = logging.getLogger("monitor")
 # whisper + ffmpeg are heavy: a few clips at a time (pipeline.RENDERERS), queue the rest
@@ -21,10 +24,12 @@ STALE_AFTER = 150
 
 
 class Monitor:
-    def __init__(self, platform: str, channel: str, name: str = "", sensitivity: float | None = None):
+    def __init__(self, platform: str, channel: str, name: str = "", sensitivity: float | None = None,
+                 category: str = ""):
         self.platform = platform
         self.channel = channel.strip().lower().lstrip("@")
         self.name = name or channel
+        self.category = category.strip()
         self.key = f"{platform}:{self.channel}"
         self.detector = Detector(
             sensitivity=sensitivity or settings.sensitivity,
@@ -39,6 +44,8 @@ class Monitor:
         self.moments: list[dict] = []
         self.jobs: list[dict] = []
         self.error = ""
+        self._talk_last_scan = 0.0
+        self._talk_last_clip = 0.0
 
     def on_message(self, ts: float, user: str, text: str):
         self.msg_count += 1
@@ -63,20 +70,57 @@ class Monitor:
         while not self.stop_evt.is_set():
             await asyncio.sleep(1)
             m = self.detector.tick()
-            if not m:
-                continue
-            if not self.recorder.is_recording():
-                log.info("%s: moment found but stream isn't recording, skipped", self.key)
-                continue
-            log.info("%s: moment score=%.1f rate=%.1f/s base=%.2f %s", self.key, m.score, m.rate, m.baseline, m.keywords)
-            self.submit(m)
+            if m:
+                if not self.recorder.is_recording():
+                    log.info("%s: moment found but stream isn't recording, skipped", self.key)
+                else:
+                    log.info("%s: moment score=%.1f rate=%.1f/s base=%.2f %s", self.key, m.score, m.rate, m.baseline, m.keywords)
+                    self.submit(m)
 
-    def submit(self, m: Moment, manual: bool = False):
+            # For high-volume channels, also look for a spoken moment over a
+            # paused/still game. This path does not require a chat spike.
+            now = time.monotonic()
+            if (self.detector.baseline is not None and self.detector.baseline >= 3.0
+                    and self.detector.active is None and now - self._talk_last_scan >= 15
+                    and m is None and now - self._talk_last_clip >= 60 and self.recorder.is_recording()):
+                self._talk_last_scan = now
+                result = await asyncio.to_thread(self._talk_pause_candidate)
+                if result:
+                    moment, transcript = result
+                    self._talk_last_clip = time.monotonic()
+                    log.info("%s: paused-game speech candidate: %s", self.key, transcript[:120])
+                    self.submit(moment, trigger="talk_pause")
+    def _talk_pause_candidate(self):
+        """Probe a recent completed buffer window without blocking the event loop."""
+        end = self.recorder.latest_end()
+        duration = 10.0
+        start = end - duration
+        entries = self.recorder.entries()
+        if not entries or start < entries[0][0] or end <= start:
+            return None
+        with tempfile.TemporaryDirectory(prefix="clipper-talk-") as tmp:
+            raw, wav = Path(tmp) / "probe.ts", Path(tmp) / "speech.wav"
+            try:
+                offset = self.recorder.extract(start, end, raw)
+                found, transcript = detect_talk_pause(raw, offset, duration, wav)
+            except Exception as e:
+                log.debug("%s: paused-game probe failed: %s", self.key, e)
+                return None
+        if not found:
+            return None
+        moment = Moment(start=start, peak=end - 3, end=end, score=0, rate=0,
+                        baseline=round(self.detector.baseline or 0, 2),
+                        top_messages=[transcript] if transcript else [],
+                        keywords=["talk_pause"])
+        return moment, transcript
+
+    def submit(self, m: Moment, manual: bool = False, trigger: str = "chat"):
         job = {"at": m.peak, "score": m.score, "status": "queued", "clip": None,
-               "keywords": m.keywords, "manual": manual}
+               "keywords": m.keywords, "manual": manual, "trigger": trigger}
         self.jobs.append(job)
         self.jobs = self.jobs[-20:]
-        meta = {"platform": self.platform, "channel": self.channel, "name": self.name}
+        meta = {"platform": self.platform, "channel": self.channel, "name": self.name,
+                "category": self.category, "trigger": trigger}
 
         loop = asyncio.get_running_loop()
 
@@ -107,7 +151,7 @@ class Monitor:
             t0 = time.time()
             try:
                 job["clip"] = pipeline.make_clip(m, self.recorder, meta, on_status=lambda s: job.update(status=s),
-                                                 force_keep=manual, piece=piece)
+                                                 force_keep=manual or trigger == "talk_pause", piece=piece)
                 if job["clip"] is None and not job["status"].startswith("dropped"):
                     job["status"] = "dropped"
             except Exception as e:
@@ -142,6 +186,7 @@ class Monitor:
             "platform": self.platform,
             "channel": self.channel,
             "name": self.name,
+            "category": self.category,
             "uptime": int(time.time() - self.started),
             "recording": self.recorder.is_recording(),
             "buffered": int(self.recorder.buffered_seconds()),
@@ -162,11 +207,12 @@ class Manager:
     def __init__(self):
         self.monitors: dict[str, Monitor] = {}
 
-    async def add(self, platform: str, channel: str, name: str = "", sensitivity: float | None = None) -> Monitor:
+    async def add(self, platform: str, channel: str, name: str = "", sensitivity: float | None = None,
+                  category: str = "") -> Monitor:
         key = f"{platform}:{channel.strip().lower().lstrip('@')}"
         if key in self.monitors:
             return self.monitors[key]
-        m = Monitor(platform, channel, name, sensitivity)
+        m = Monitor(platform, channel, name, sensitivity, category)
         self.monitors[key] = m
         await m.start()
         return m

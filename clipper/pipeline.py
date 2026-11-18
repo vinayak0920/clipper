@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+import queue
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -63,6 +65,17 @@ _model_lock = threading.Lock()
 _side = ThreadPoolExecutor(max_workers=4, thread_name_prefix="clip-side")
 
 
+def _analyze_layout(video: Path, start: float, duration: float, category: str):
+    """Call the category-aware framer, while remaining compatible with older copies."""
+    try:
+        return reframe.analyze(video, start=start, duration=duration, samples=14, category=category)
+    except TypeError as e:
+        if "category" not in str(e) and "keyword" not in str(e):
+            raise
+        log.warning("reframe.py is outdated; using its category-blind layout until it is replaced")
+        return reframe.analyze(video, start=start, duration=duration, samples=14)
+
+
 _encoder = None
 
 
@@ -102,6 +115,68 @@ def run(cmd: list[str], cwd: Path | None = None, timeout: float = 90):
     if p.returncode != 0:
         raise RuntimeError(f"{cmd[0]} failed: {p.stderr[-800:]}")
     return p
+
+
+def run_render(cmd: list[str], cwd: Path, duration: float, status, timeout: float | None = None):
+    """Run a render while forwarding FFmpeg progress to the clip job status."""
+    if cmd[0] == "ffmpeg" and "-nostdin" not in cmd:
+        cmd = [cmd[0], "-nostdin", *cmd[1:]]
+    timeout = timeout or float(os.getenv("RENDER_TIMEOUT_SECONDS", "300"))
+    p = subprocess.Popen(cmd, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE, text=True, bufsize=1, errors="replace")
+    progress_lines: queue.Queue[str] = queue.Queue()
+    errors: deque[str] = deque(maxlen=40)
+
+    def collect(stream, sink):
+        try:
+            for line in iter(stream.readline, ""):
+                sink(line.rstrip())
+        finally:
+            stream.close()
+
+    readers = [
+        threading.Thread(target=collect, args=(p.stdout, progress_lines.put), daemon=True),
+        threading.Thread(target=collect, args=(p.stderr, errors.append), daemon=True),
+    ]
+    for reader in readers:
+        reader.start()
+
+    deadline = time.monotonic() + timeout
+    last_percent = -1
+    status("rendering 0%")
+    while True:
+        if time.monotonic() >= deadline:
+            p.kill()
+            p.wait()
+            for reader in readers:
+                reader.join(timeout=1)
+            detail = "\n".join(errors)[-800:]
+            raise TimeoutError(f"ffmpeg render exceeded {timeout:.0f}s" + (f": {detail}" if detail else ""))
+        try:
+            line = progress_lines.get(timeout=0.25)
+        except queue.Empty:
+            if p.poll() is not None:
+                break
+            continue
+        if line.startswith("out_time_us="):
+            try:
+                out_time = int(line.split("=", 1)[1]) / 1_000_000
+                percent = min(99, int(out_time / max(duration, 0.1) * 100))
+                if percent >= last_percent + 5:
+                    last_percent = percent
+                    status(f"rendering {percent}%")
+            except ValueError:
+                pass
+        elif line == "progress=end":
+            break
+
+    returncode = p.wait()
+    for reader in readers:
+        reader.join(timeout=1)
+    if returncode:
+        detail = "\n".join(errors)[-800:]
+        raise RuntimeError(f"ffmpeg render failed (exit {returncode})" + (f": {detail}" if detail else ""))
+    status("rendering 100%")
 
 
 def probe_duration(path: Path) -> float:
@@ -194,7 +269,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
     offset, duration, win_start = piece["offset"], piece["duration"], piece["win_start"]
 
     # face framing runs alongside transcription; it only needs the video
-    layout_job = _side.submit(reframe.analyze, raw, offset, min(duration, 40))
+    layout_job = _side.submit(_analyze_layout, raw, offset, min(duration, 40), meta.get("category", ""))
     t0 = time.time()
 
     # 2. transcribe the window
@@ -244,23 +319,25 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
     status("rendering")
     ass = build_ass(clip_words, y=layout.caption_y)
     if os.getenv("SHOW_TITLE", "1") == "1":
-        # split layout: hook sits on the seam between facecam and gameplay; others: near the top
-        hook_y = reframe.TOP_H if layout.mode == "split" else 260
+        # Keep the title in the upper panel regardless of which panel holds gameplay.
+        game_top = getattr(layout, "game_top", True)
+        hook_y = 240 if game_top else getattr(reframe, "CAM_TOP_H", 700) + 120
         ass += build_title_ass(title, end - start, y=hook_y)
     (out_dir / "captions.ass").write_text(ass, encoding="utf-8")
     fonts = str(settings.fonts_dir).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
     # reset timestamps to 0 so caption timing lines up with the cut (stream PTS never start at 0)
     graph = ("[0:v]setpts=PTS-STARTPTS[s0];" + layout.filter_graph().replace("[0:v]", "[s0]")
-             + f";[v]subtitles=captions.ass:fontsdir='{fonts}'[vout]")
+             + f";[v]subtitles=filename=captions.ass:fontsdir={fonts}[vout]")
     def render(enc):
-        run([
+        run_render([
             "ffmpeg", "-y", "-loglevel", "error",
+            "-progress", "pipe:1", "-stats_period", "1", "-nostats",
             "-ss", f"{offset + start:.2f}", "-i", "raw.ts", "-t", f"{end - start:.2f}",
             "-filter_complex", graph, "-map", "[vout]", "-map", "0:a:0?",
             *enc, "-r", "30", "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "160k", "-af", "asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11",
             "-movflags", "+faststart", "clip.mp4",
-        ], cwd=out_dir, timeout=120)
+        ], cwd=out_dir, duration=end - start, status=status)
     try:
         render(video_encoder())
     except Exception as e:
@@ -270,6 +347,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
         global _encoder
         _encoder = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21"]
         render(_encoder)
+    status("saving thumbnail")
     run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", "clip.mp4", "-frames:v", "1",
          "-vf", "scale=360:-2", "thumb.jpg"], cwd=out_dir)
 
@@ -278,6 +356,8 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
         "platform": meta["platform"],
         "channel": meta["channel"],
         "name": meta.get("name") or meta["channel"],
+        "category": meta.get("category", ""),
+        "trigger": meta.get("trigger", "chat"),
         "title": title,
         "created": time.time(),
         "moment_at": moment.peak,
@@ -289,6 +369,9 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
         "chat": moment.top_messages,
         "language": lang,
         "layout": layout.mode,
+        "game_top": getattr(layout, "game_top", True),
+        "layout_label": ("Gameplay top · facecam bottom" if getattr(layout, "game_top", True) else "Facecam top · gameplay bottom")
+                        if layout.mode == "split" else {"face": "Face crop", "fill": "Blurred fill"}.get(layout.mode, layout.mode),
         "transcript": " ".join(w.text for w in clip_words),
         "ai": bool(verdict),
         "ai_reason": (verdict or {}).get("reason", ""),

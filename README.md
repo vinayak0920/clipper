@@ -10,10 +10,11 @@ Recording, transcription and rendering all run on your own machine. Sign in with
 - **Records live.** Keeps a rolling buffer of the last 4 minutes per streamer. The stream is copied as-is, not re-encoded, so CPU use stays low.
 - **Finds the moment from chat.** Each streamer's normal chat speed is learned first. A clip fires when chat clears a statistical bar for its size and either jumps well above that normal speed or fills with laugh, shock and "clip it" words (KEKW, LUL, 💀, W, bhai, op...). Hype words only count above what that chat usually spams.
 - **Cuts with context.** Each clip starts about 20 seconds before chat reacted, so the setup is in, and ends just after the payoff.
-- **Picks the vertical layout itself.** Face detection chooses one of three:
-  - **split:** facecam on top, gameplay below, for gaming streams with a cam
+- **Picks the vertical layout itself.** Stream category and persistent facecam detection choose one of three:
+  - **split:** gaming streams use two panels with a centered close-up facecam. Most games put larger gameplay above the facecam; GTA, Red Dead Redemption and Cyberpunk put the facecam above larger gameplay.
   - **face:** crop that follows the streamer, for IRL streams
-  - **blurred fill:** the frame centred on a blurred copy of itself, when there's no face
+  - **blurred fill:** centered gameplay over a blurred copy of itself when a webcam cannot be located
+- Gameplay framing uses the center of the source feed, which generally keeps the crosshair and active play visible. It does not yet read a game's alive/dead state or track the in-game player automatically.
 - **Animated captions.** Word by word: 1-3 words on screen, the spoken word pops and turns yellow or green, shouts go red. Hindi can come out as Hinglish ("bhai kya hua") or in Devanagari.
 - **AI hooks and trimming (optional).** An AI writes a short hook in the streamer's language, trims the clip to the setup and payoff, and skips moments that won't work as a short. The hook shows as a bold white bar for the first 3 seconds.
 - **Dashboard.** Three views:
@@ -57,6 +58,8 @@ Every second, for each streamer:
 4. Weight the result by extra hype words and spam.
 5. When the spike cools down, cut the clip and queue it for rendering.
 
+For high-chat channels (baseline at least 3 messages/second), Clipper also scans every 15 seconds for a 10-second stretch with a nearly still game image and recognizable speech. That can catch a streamer talking to chat while a game is paused even when chat never produces a new spike. It waits at least 60 seconds between these candidates. This is an approximation: it cannot verify gaze direction or know the game's alive/dead state, and loud game audio can affect speech recognition.
+
 Turn the sensitivity up (3-4) for fewer, bigger moments, or down (2-2.3) to catch more.
 
 ## Project layout
@@ -68,6 +71,7 @@ clipper/
   recorder.py    streamlink -> ffmpeg rolling segment buffer
   chat.py        Twitch IRC (anonymous), Kick chat feed
   detector.py    per-channel chat spike detection
+  talk_detector.py  paused-game speech candidate detection for high-chat channels
   pipeline.py    cut -> transcribe -> AI judge -> layout -> render
   reframe.py     face detection and 9:16 layouts
   captions.py    animated .ass captions and hook bar

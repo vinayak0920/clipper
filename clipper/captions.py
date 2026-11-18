@@ -52,7 +52,7 @@ def group_words(words: list[Word], max_words=3, max_chars=16, gap=0.45) -> list[
     return groups
 
 
-def build_ass(words: list[Word], y: int = 1360, font_size: int = 112) -> str:
+def build_ass(words: list[Word], y: int = 1360, font_size: int = 124) -> str:
     uses_devanagari = any(DEVANAGARI.search(w.text) for w in words)
     font = "Noto Sans Devanagari" if uses_devanagari else "Montserrat Black"
     header = f"""[Script Info]
@@ -89,12 +89,12 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                 if j == wi:
                     color = EMPHASIS if SHOUT.search(x.text.strip()) else hl
                     parts.append(
-                        f"{{\\c{color}\\fscx100\\fscy100\\t(0,70,\\fscx120\\fscy120)\\t(70,150,\\fscx114\\fscy114)}}"
+                        f"{{\\c{color}\\fscx100\\fscy100\\t(0,90,\\fscx128\\fscy128)\\t(90,180,\\fscx112\\fscy112)\\t(180,260,\\fscx100\\fscy100)}}"
                         f"{t}{{\\c&H00FFFFFF&\\fscx100\\fscy100}}"
                     )
                 else:
                     parts.append(t)
-            entry = "\\fscx72\\fscy72\\t(0,110,\\fscx100\\fscy100)" if wi == 0 else ""
+            entry = "\\fscx78\\fscy78\\frz-2\\t(0,140,\\fscx100\\fscy100\\frz0)\\fad(0,80)" if wi == 0 else ""
             text = f"{{\\an5\\pos({W // 2},{y}){entry}}}" + " ".join(parts)
             lines.append(f"Dialogue: 0,{_ts(seg_start)},{_ts(seg_end)},Cap,,0,0,0,,{text}")
     return header + "\n".join(lines) + "\n"
@@ -118,7 +118,7 @@ def _wrap(text: str, width: int = 18) -> str:
     return "\\N".join(lines)
 
 
-def build_title_ass(title: str, duration: float, y: int = 230, seconds: float = 3.0) -> str:
+def build_title_ass(title: str, duration: float, y: int = 230, seconds: float = 4.0) -> str:
     """Hook bar: black text on a white box, pops in with a slight tilt, fades out after `seconds`."""
     t = _esc(title).strip()
     if not t:
