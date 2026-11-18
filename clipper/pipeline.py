@@ -26,6 +26,10 @@ from .config import settings
 from .detector import Moment
 
 log = logging.getLogger("pipeline")
+
+# How many clips are made at the same time. Two on an 8-core Mac keeps each one fast.
+RENDERERS = int(os.getenv("RENDERERS", "0")) or (3 if (os.cpu_count() or 4) >= 12 else 2 if (os.cpu_count() or 4) >= 6 else 1)
+TRANSCRIBE_BUDGET = float(os.getenv("TRANSCRIBE_SECONDS", "18"))   # captions stop here, the clip still renders
 _whisper = None
 
 
@@ -38,7 +42,8 @@ def _model():
             device = "cuda" if _has_cuda() else "cpu"
         _whisper = WhisperModel(settings.whisper_model, device=device,
                                 compute_type="float16" if device == "cuda" else "int8",
-                                cpu_threads=os.cpu_count() or 4)
+                                cpu_threads=max(2, (os.cpu_count() or 4) // RENDERERS),
+                                num_workers=RENDERERS)
     return _whisper
 
 
@@ -55,7 +60,7 @@ def warm_up():
 
 
 _model_lock = threading.Lock()
-_side = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip-side")
+_side = ThreadPoolExecutor(max_workers=4, thread_name_prefix="clip-side")
 
 
 _encoder = None
@@ -90,8 +95,10 @@ def _has_cuda() -> bool:
         return False
 
 
-def run(cmd: list[str], cwd: Path | None = None):
-    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+def run(cmd: list[str], cwd: Path | None = None, timeout: float = 90):
+    if cmd[0] == "ffmpeg" and "-nostdin" not in cmd:
+        cmd = [cmd[0], "-nostdin", *cmd[1:]]
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     if p.returncode != 0:
         raise RuntimeError(f"{cmd[0]} failed: {p.stderr[-800:]}")
     return p
@@ -105,19 +112,28 @@ def probe_duration(path: Path) -> float:
         return 0.0
 
 
-def transcribe(audio: Path) -> tuple[list[Word], str]:
-    with _model_lock:
+def transcribe(audio: Path, budget: float = TRANSCRIBE_BUDGET) -> tuple[list[Word], str]:
+    """Word-timed transcript, cut off at `budget` seconds so one clip can't stall the queue."""
+    deadline = time.time() + budget
+    if not _model_lock.acquire(timeout=min(15.0, budget)):
+        raise RuntimeError("speech model is still loading (first run downloads it)")
+    try:
         model = _model()
+    finally:
+        _model_lock.release()
     segments, info = model.transcribe(
         str(audio), word_timestamps=True, vad_filter=True,
         language=settings.caption_language or None, beam_size=1,
         condition_on_previous_text=False,
     )
     words = []
-    for seg in segments:
+    for seg in segments:              # lazy: each step decodes the next piece of audio
         for w in seg.words or []:
             if w.word.strip():
                 words.append(Word(w.word.strip(), float(w.start), float(w.end)))
+        if time.time() > deadline:
+            log.warning("transcription hit its %.0fs budget, using what it has", budget)
+            break
     return words, info.language
 
 
@@ -157,6 +173,10 @@ def cut(moment: Moment, recorder) -> dict:
     return {"cid": cid, "out_dir": out_dir, "raw": raw, "offset": offset, "duration": duration, "win_start": win_start}
 
 
+def discard(piece: dict):
+    shutil.rmtree(piece["out_dir"], ignore_errors=True)
+
+
 def ready_at(moment: Moment) -> float:
     """Wall-clock time when the reaction after a moment has finished recording."""
     return moment.end + settings.post_roll + settings.segment_seconds * 1.5
@@ -175,6 +195,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
 
     # face framing runs alongside transcription; it only needs the video
     layout_job = _side.submit(reframe.analyze, raw, offset, min(duration, 40))
+    t0 = time.time()
 
     # 2. transcribe the window
     status("transcribing")
@@ -213,7 +234,11 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
 
     # 4. layout
     status("framing")
-    layout = layout_job.result()
+    try:
+        layout = layout_job.result(timeout=30)
+    except Exception as e:
+        log.warning("framing failed, using the plain layout: %s", e)
+        layout = reframe.choose_layout(1280, 720, [], 0)
 
     # 5. captions + render
     status("rendering")
@@ -227,14 +252,24 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
     # reset timestamps to 0 so caption timing lines up with the cut (stream PTS never start at 0)
     graph = ("[0:v]setpts=PTS-STARTPTS[s0];" + layout.filter_graph().replace("[0:v]", "[s0]")
              + f";[v]subtitles=captions.ass:fontsdir='{fonts}'[vout]")
-    run([
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-ss", f"{offset + start:.2f}", "-i", "raw.ts", "-t", f"{end - start:.2f}",
-        "-filter_complex", graph, "-map", "[vout]", "-map", "0:a:0?",
-        *video_encoder(), "-r", "30", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "160k", "-af", "asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11",
-        "-movflags", "+faststart", "clip.mp4",
-    ], cwd=out_dir)
+    def render(enc):
+        run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-ss", f"{offset + start:.2f}", "-i", "raw.ts", "-t", f"{end - start:.2f}",
+            "-filter_complex", graph, "-map", "[vout]", "-map", "0:a:0?",
+            *enc, "-r", "30", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "160k", "-af", "asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11",
+            "-movflags", "+faststart", "clip.mp4",
+        ], cwd=out_dir, timeout=120)
+    try:
+        render(video_encoder())
+    except Exception as e:
+        if "videotoolbox" not in " ".join(video_encoder()):
+            raise
+        log.warning("hardware encoder failed, using x264: %s", str(e)[-200:])
+        global _encoder
+        _encoder = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21"]
+        render(_encoder)
     run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", "clip.mp4", "-frames:v", "1",
          "-vf", "scale=360:-2", "thumb.jpg"], cwd=out_dir)
 
@@ -257,6 +292,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
         "transcript": " ".join(w.text for w in clip_words),
         "ai": bool(verdict),
         "ai_reason": (verdict or {}).get("reason", ""),
+        "render_seconds": round(time.time() - t0, 1),
         "video": f"/clips/{cid}/clip.mp4",
         "thumb": f"/clips/{cid}/thumb.jpg",
     }

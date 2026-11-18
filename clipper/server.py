@@ -56,7 +56,7 @@ SCHEMA = [
         {"key": "SENSITIVITY", "label": "Chat must run this many times its normal speed", "kind": "number", "default": "2.6", "min": 1.5, "max": 5, "step": 0.1},
         {"key": "PRE_ROLL", "label": "Seconds kept before chat reacts", "kind": "number", "default": "22", "min": 5, "max": 45, "step": 1},
         {"key": "POST_ROLL", "label": "Seconds kept after it calms", "kind": "number", "default": "6", "min": 0, "max": 20, "step": 1},
-        {"key": "COOLDOWN_SECONDS", "label": "Wait between clips of one streamer (s)", "kind": "number", "default": "75", "min": 15, "max": 600, "step": 5},
+        {"key": "COOLDOWN_SECONDS", "label": "Wait between clips of one streamer (s). Big chats use 20s at most", "kind": "number", "default": "45", "min": 15, "max": 600, "step": 5},
         {"key": "MAX_CLIP", "label": "Longest clip (s)", "kind": "number", "default": "59", "min": 15, "max": 180, "step": 1},
     ]},
     {"group": "output", "title": "Recording and captions", "fields": [

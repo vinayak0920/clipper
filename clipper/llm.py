@@ -26,6 +26,8 @@ from . import cloud, config  # noqa: F401  (config loads .env)
 log = logging.getLogger("llm")
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
+# A clip never waits longer than this for the AI. Past it, the clip renders with a plain trim and title.
+AI_TIMEOUT = float(os.getenv("AI_TIMEOUT", "12"))
 DEFAULT_MODELS = {
     "ollama": "qwen2.5:7b",
     "anthropic": "claude-haiku-5-5",
@@ -105,14 +107,14 @@ def _ask(prompt: str, max_tokens: int = 800) -> str:
             "model": model, "stream": False, "format": "json",
             "options": {"temperature": 0.4, "num_predict": max_tokens},
             "messages": [{"role": "user", "content": prompt}],
-        }, timeout=180)
+        }, timeout=AI_TIMEOUT)
         r.raise_for_status()
         return r.json()["message"]["content"]
     if p == "anthropic":
         r = httpx.post("https://api.anthropic.com/v1/messages", headers={
             "x-api-key": os.environ["ANTHROPIC_API_KEY"], "anthropic-version": "2023-06-01",
         }, json={"model": model, "max_tokens": max_tokens,
-                 "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+                 "messages": [{"role": "user", "content": prompt}]}, timeout=AI_TIMEOUT)
         r.raise_for_status()
         return "".join(b.get("text", "") for b in r.json().get("content", []))
     if p in ("openai", "groq"):
@@ -122,7 +124,7 @@ def _ask(prompt: str, max_tokens: int = 800) -> str:
             "Authorization": f"Bearer {os.environ[KEY_ENV[p]]}",
         }, json={"model": model, "max_tokens": max_tokens, "temperature": 0.4,
                  "response_format": {"type": "json_object"},
-                 "messages": [{"role": "user", "content": prompt}]}, timeout=60)
+                 "messages": [{"role": "user", "content": prompt}]}, timeout=AI_TIMEOUT)
         r.raise_for_status()
         return r.json()["choices"][0]["message"]["content"]
     if p == "gemini":
@@ -132,7 +134,7 @@ def _ask(prompt: str, max_tokens: int = 800) -> str:
             json={"contents": [{"parts": [{"text": prompt}]}],
                   "generationConfig": {"maxOutputTokens": max_tokens, "temperature": 0.4,
                                        "responseMimeType": "application/json"}},
-            timeout=60)
+            timeout=AI_TIMEOUT)
         r.raise_for_status()
         parts = r.json()["candidates"][0]["content"]["parts"]
         return "".join(x.get("text", "") for x in parts)

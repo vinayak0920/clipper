@@ -95,16 +95,21 @@ class Detector:
         expected = base * self.window
         sd = math.sqrt(max(expected, self.base_var * self.window ** 2))
         significant = len(win) >= expected + 4 * sd + 3
+        # Big chats (3+ messages a second) rarely triple their speed, but they have far more
+        # moments worth clipping: lower the bar a little and allow clips closer together.
+        big = base >= 3.0
+        sens = self.sensitivity * (0.8 if big else 1.0)
+        cooldown = min(self.cooldown, 20.0) if big else self.cooldown
         firing = (
             warm
             and significant
-            and boosted >= self.sensitivity
-            and ratio >= max(1.8, self.sensitivity * 0.7)
+            and boosted >= sens
+            and ratio >= max(1.6 if big else 1.8, sens * 0.7)
         )
 
         result = None
         if self.active is None:
-            if firing and now - self.last_moment_end >= self.cooldown:
+            if firing and now - self.last_moment_end >= cooldown:
                 self.active = {"start": now - self.window, "peak": now, "peak_score": boosted,
                                "peak_rate": rate, "msgs": list(win)}
         else:
@@ -113,7 +118,7 @@ class Detector:
             a["msgs"].extend(m for m in win if m[0] > last_ts)
             if boosted > a["peak_score"]:
                 a.update(peak=now, peak_score=boosted, peak_rate=rate)
-            cooled = ratio < 1.5 or boosted < self.sensitivity * 0.55
+            cooled = ratio < 1.5 or boosted < sens * 0.55
             too_long = now - a["start"] > 30
             if cooled or too_long:
                 result = self._finish(now)

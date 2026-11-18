@@ -45,7 +45,7 @@ class Settings:
         self.segment_seconds = _f("SEGMENT_SECONDS", 4)
         self.sensitivity = _f("SENSITIVITY", 2.6)
         self.warmup_seconds = _f("WARMUP_SECONDS", 45)
-        self.cooldown_seconds = _f("COOLDOWN_SECONDS", 75)
+        self.cooldown_seconds = _f("COOLDOWN_SECONDS", 45)
         self.pre_roll = _f("PRE_ROLL", 22)
         self.post_roll = _f("POST_ROLL", 6)
         self.max_clip = _f("MAX_CLIP", 59)

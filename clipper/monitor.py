@@ -13,8 +13,11 @@ from .detector import Detector, Moment
 from .recorder import Recorder
 
 log = logging.getLogger("monitor")
-# whisper + ffmpeg are heavy: render one clip at a time, queue the rest
-WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="render")
+# whisper + ffmpeg are heavy: a few clips at a time (pipeline.RENDERERS), queue the rest
+WORKER = ThreadPoolExecutor(max_workers=pipeline.RENDERERS, thread_name_prefix="render")
+# a clip that waited this long in the queue is skipped: by then the moment is old news
+# and rendering it would only push newer clips back
+STALE_AFTER = 150
 
 
 class Monitor:
@@ -80,10 +83,11 @@ class Monitor:
         async def prepare():
             # wait for the reaction to finish recording outside the render queue,
             # so one clip's wait never holds up another clip's render
-            wait = pipeline.ready_at(m) - time.time()
-            if wait > 0:
-                job["status"] = "recording the reaction"
-                await asyncio.sleep(wait)
+            need = m.end + settings.post_roll
+            job["status"] = "recording the reaction"
+            limit = time.time() + settings.post_roll + 25
+            while self.recorder.latest_end() < need and time.time() < limit:
+                await asyncio.sleep(1)
             job["status"] = "cutting"
             try:
                 piece = await asyncio.to_thread(pipeline.cut, m, self.recorder)
@@ -92,9 +96,15 @@ class Monitor:
                 job["status"] = f"error: {e}"[:200]
                 return
             job["status"] = "queued"
+            job["queued_at"] = time.time()
             loop.run_in_executor(WORKER, lambda: work(piece))
 
         def work(piece):
+            if time.time() - job["queued_at"] > STALE_AFTER and not manual:
+                job["status"] = "skipped: too many clips at once"
+                pipeline.discard(piece)
+                return
+            t0 = time.time()
             try:
                 job["clip"] = pipeline.make_clip(m, self.recorder, meta, on_status=lambda s: job.update(status=s),
                                                  force_keep=manual, piece=piece)
@@ -103,6 +113,9 @@ class Monitor:
             except Exception as e:
                 log.exception("clip failed")
                 job["status"] = f"error: {e}"[:200]
+                pipeline.discard(piece)
+            job["took"] = round(time.time() - t0)
+            log.info("%s: clip %s in %ss", self.key, job["status"], job["took"])
 
         loop.create_task(prepare())
 

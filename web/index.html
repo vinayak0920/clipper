@@ -441,9 +441,9 @@ async function pollMonitors() {
     el.querySelectorAll(".vu i").forEach((i, n) => { i.className = n < lit ? "lit" + (n >= thr ? " max" : n >= thr * .7 ? " hot" : "") : ""; });
     el.querySelector(".msg").textContent = [m.chat_error, m.recorder_error].filter(Boolean).join(" ");
     el.querySelector(".jobs").innerHTML = m.jobs.slice().reverse().map(j => {
-      const st = j.status, cls = st === "done" ? "done" : (st.startsWith("error") || st.startsWith("dropped")) ? "bad" : "";
+      const st = j.status, cls = st === "done" ? "done" : (st.startsWith("error") || st.startsWith("dropped") || st.startsWith("skipped")) ? "bad" : "";
       const time = new Date(j.at * 1000).toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
-      const label = st === "done" ? "Ready in Clips" : st.startsWith("dropped") ? "Skipped by AI" : st.startsWith("error") ? "Failed" : st[0].toUpperCase() + st.slice(1) + "...";
+      const label = st === "done" ? `Ready in ${j.took ?? "?"}s` : st.startsWith("dropped") ? "Skipped by AI" : st.startsWith("skipped") ? "Skipped, too many at once" : st.startsWith("error") ? "Failed" : st[0].toUpperCase() + st.slice(1) + "...";
       return `<div class="job" title="${esc(st)}"><span class="num">${time}</span><span>${j.manual ? "Your clip" : "Chat spike " + j.score + "x"}</span><span class="s ${cls}">${label}</span></div>`;
     }).join("");
     draw(el.querySelector("canvas"), m.history, m.sensitivity);

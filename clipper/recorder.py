@@ -1,7 +1,8 @@
 """Records a live stream into a rolling buffer of short .ts segments.
 
 streamlink pulls the HLS stream (Twitch or Kick), ffmpeg splits it into ~4s
-segments named by wall-clock start time, and anything older than
+numbered segments and lists each one's stream time in a CSV. Stream time is
+mapped to wall-clock time (to line up with chat), and anything older than
 BUFFER_SECONDS is deleted. When a moment is found we stitch the segments that
 cover it. Nothing is re-encoded while recording, so CPU stays near zero.
 """
@@ -35,6 +36,12 @@ class Recorder:
         self.stopped = False
         self.error = ""
         self._thread = None
+        self._gen = 0                 # bumps on every reconnect: new files, new stream clock
+        self._list = None             # this run's segment CSV
+        self._read = 0                # bytes of it already parsed
+        self._offset = None           # wall clock minus stream time, for this run
+        self._index: list[tuple[float, float, Path]] = []   # (wall start, wall end, file), oldest first
+        self._lock = threading.Lock()
 
     # ------------------------------------------------------------ process control
     def start(self):
@@ -50,12 +57,18 @@ class Recorder:
         ]
         if self.platform == "twitch":
             sl_cmd[1:1] = ["--twitch-disable-ads", "--twitch-low-latency"]
+        # Numbered files, never named by the clock: the stream arrives in bursts, so two
+        # segments can start in the same second, and a clock name would overwrite one of them.
+        self._gen += 1
+        self._list = self.dir / f"list_{self._gen}.csv"
+        self._read = 0
+        self._offset = None
         ff_cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-i", "pipe:0",
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", "pipe:0",
             "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy",
             "-f", "segment", "-segment_time", str(settings.segment_seconds),
-            "-strftime", "1",
-            str(self.dir / "seg_%s.ts"),
+            "-segment_list", str(self._list), "-segment_list_type", "csv", "-segment_list_flags", "+live",
+            str(self.dir / f"seg_{self._gen}_%06d.ts"),
         ]
         self.sl = subprocess.Popen(sl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.ff = subprocess.Popen(ff_cmd, stdin=self.sl.stdout, stderr=subprocess.PIPE)
@@ -68,8 +81,10 @@ class Recorder:
                 self._spawn()
                 log.info("recording %s/%s", self.platform, self.channel)
                 while not self.stopped and self.ff.poll() is None:
+                    self._scan()
                     self._prune()
-                    time.sleep(2)
+                    time.sleep(1)
+                self._scan()
                 if self.stopped:
                     break
                 err = (self.sl.stderr.read() or b"").decode(errors="ignore")[-400:]
@@ -98,38 +113,75 @@ class Recorder:
         self._kill()
 
     # ------------------------------------------------------------ buffer access
+    def _scan(self):
+        """Reads newly finished segments from ffmpeg's CSV and gives each a wall-clock span."""
+        lst = self._list
+        if not lst or not lst.exists():
+            return
+        with open(lst, "r", encoding="utf-8", errors="ignore") as f:
+            f.seek(self._read)
+            chunk = f.read()
+        if not chunk:
+            return
+        done, _, rest = chunk.rpartition("\n")
+        if not done:
+            return
+        self._read += len(done) + 1
+        now = time.time()
+        with self._lock:
+            for line in done.splitlines():
+                parts = line.strip().split(",")
+                if len(parts) < 3:
+                    continue
+                try:
+                    name, st, en = parts[0], float(parts[1]), float(parts[2])
+                except ValueError:
+                    continue
+                # A segment is listed the moment it is complete, never before its content
+                # was live, so the smallest (seen - stream end) is the closest mapping.
+                off = now - en
+                self._offset = off if self._offset is None else min(self._offset, off)
+                path = self.dir / name
+                if path.exists():
+                    self._index.append((st + self._offset, en + self._offset, path))
+            self._index.sort(key=lambda x: x[0])
+
+    def entries(self) -> list[tuple[float, float, Path]]:
+        with self._lock:
+            return list(self._index)
+
     def segments(self) -> list[tuple[float, Path]]:
-        segs = []
-        for p in self.dir.glob("seg_*.ts"):
-            try:
-                segs.append((float(p.stem.split("_")[1]), p))
-            except ValueError:
-                pass
-        return sorted(segs)
+        return [(s, p) for s, _, p in self.entries()]
 
     def _prune(self):
         cutoff = time.time() - settings.buffer_seconds
-        for ts, p in self.segments():
-            if ts < cutoff:
-                p.unlink(missing_ok=True)
+        with self._lock:
+            keep = []
+            for s, e, p in self._index:
+                if e < cutoff:
+                    p.unlink(missing_ok=True)
+                else:
+                    keep.append((s, e, p))
+            self._index = keep
+        for old in self.dir.glob("list_*.csv"):
+            if old != self._list and not any(p.name.startswith(f"seg_{old.stem.split('_')[1]}_") for _, _, p in self.entries()):
+                old.unlink(missing_ok=True)
 
     def buffered_seconds(self) -> float:
-        s = self.segments()
-        return (time.time() - s[0][0]) if s else 0.0
+        e = self.entries()
+        return (e[-1][1] - e[0][0]) if e else 0.0
 
     def is_recording(self) -> bool:
-        s = self.segments()
-        return bool(s) and time.time() - s[-1][0] < settings.segment_seconds * 4
+        e = self.entries()
+        return bool(e) and time.time() - e[-1][1] < max(20.0, settings.segment_seconds * 5)
+
+    def latest_end(self) -> float:
+        e = self.entries()
+        return e[-1][1] if e else 0.0
 
     def extract(self, start: float, end: float, out: Path) -> float:
-        """Concatenate the segments covering [start, end]. Returns the offset (s) of `start` inside `out`."""
-        segs = self.segments()
-        # the newest segment is still being written; only use finished ones
-        chosen = []
-        for i, (ts, p) in enumerate(segs[:-1]):
-            nxt = segs[i + 1][0]
-            if nxt > start and ts < end:
-                chosen.append((ts, p))
+        """Concatenates the finished segments covering [start, end]. Returns the offset (s) of `start` inside `out`."""
+        chosen = [(s, p) for s, e, p in self.entries() if e > start and s < end]
         if not chosen:
             raise RuntimeError("no buffered video for this moment (buffer too short or stream lagging)")
         with open(out, "wb") as w:

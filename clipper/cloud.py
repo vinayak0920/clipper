@@ -129,7 +129,7 @@ def live(region: str, platforms: list[str], min_viewers: int) -> dict:
 
 
 def hook(words: list, chat: list[str], keywords: list[str], channel: str, duration: float, reaction_at: float) -> dict:
-    out = _req("POST", "/v1/hook", timeout=120, json={
+    out = _req("POST", "/v1/hook", timeout=float(os.getenv("AI_TIMEOUT", "12")), json={
         "words": [{"text": w.text, "start": w.start, "end": w.end} for w in words],
         "chat": chat, "keywords": keywords, "channel": channel,
         "duration": duration, "reaction_at": reaction_at,
@@ -139,6 +139,6 @@ def hook(words: list, chat: list[str], keywords: list[str], channel: str, durati
 
 
 def transliterate(words: list) -> list[str]:
-    out = _req("POST", "/v1/transliterate", timeout=120, json={
+    out = _req("POST", "/v1/transliterate", timeout=float(os.getenv("AI_TIMEOUT", "12")), json={
         "words": [{"text": w.text, "start": w.start, "end": w.end} for w in words]})
     return out["words"]
