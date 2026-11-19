@@ -375,6 +375,12 @@ async function pollStats() {
 /* ---------- live ---------- */
 async function search() {
   const plats = [$("#pTwitch").checked && "twitch", $("#pKick").checked && "kick"].filter(Boolean).join(",");
+  // When discovery is filtered to one platform, use that platform in the
+  // manual Add a channel form too. The two controls are otherwise easy to
+  // mistake for one shared selection.
+  if ($("#pTwitch").checked !== $("#pKick").checked) {
+    $("#addPlat").value = $("#pKick").checked ? "kick" : "twitch";
+  }
   if (!plats) { $("#results").innerHTML = `<div class="empty">Tick Twitch, Kick or both.</div>`; return; }
   $("#results").innerHTML = `<div class="empty">Checking who's live...</div>`;
   try {
@@ -622,6 +628,12 @@ function pollPro(n = 0) {
 
 /* ---------- boot ---------- */
 window.addEventListener("hashchange", () => go(location.hash.slice(1) || "live"));
+function syncAddPlatform() {
+  const twitch = $("#pTwitch").checked, kick = $("#pKick").checked;
+  if (twitch !== kick) $("#addPlat").value = kick ? "kick" : "twitch";
+}
+$("#pTwitch").addEventListener("change", syncAddPlatform);
+$("#pKick").addEventListener("change", syncAddPlatform);
 $("#search").onclick = search;
 $("#addBtn").onclick = () => watch($("#addPlat").value, $("#addName").value.trim(), $("#addName").value.trim());
 $("#addName").addEventListener("keydown", e => e.key === "Enter" && $("#addBtn").click());
