@@ -159,9 +159,16 @@ _kick_web_cache = {"at": 0.0, "rows": []}
 
 
 def _kick_web_all(pages: int = 6) -> list[dict]:
-    """kick.com's browse feed ignores the language in the URL, so pull the top pages once and filter locally."""
+    """Page through Kick's public browse feed, then filter its mixed-language rows locally.
+
+    Kick's web feed returns a small page even when `limit=100` is requested.
+    Stopping when a page has fewer than 100 rows therefore only searched page 1.
+    """
     if time.time() - _kick_web_cache["at"] < 60:
         return _kick_web_cache["rows"]
+    if cffi_requests is None:
+        raise RuntimeError("Install curl_cffi to query Kick's public browse feed")
+
     rows = []
     for page in range(1, pages + 1):
         r = cffi_requests.get(
@@ -170,10 +177,17 @@ def _kick_web_all(pages: int = 6) -> list[dict]:
             impersonate="chrome", timeout=15,
         )
         r.raise_for_status()
-        data = r.json().get("data", [])
-        rows.extend(data)
-        if len(data) < 100:
+        payload = r.json()
+        data = payload.get("data", []) if isinstance(payload, dict) else []
+        if isinstance(data, dict):
+            data = data.get("livestreams", [])
+        if not isinstance(data, list) or not data:
             break
+        rows.extend(data)
+        last_page = payload.get("last_page") or payload.get("lastPage")
+        if last_page and page >= int(last_page):
+            break
+
     _kick_web_cache.update(at=time.time(), rows=rows)
     return rows
 
@@ -189,12 +203,19 @@ def kick_streams(language: str) -> list[dict]:
         )
         r.raise_for_status()
         return [_kick_row(s, language) for s in r.json().get("data", [])]
-    # Fallback without API keys: kick.com's own browse feed, filtered by language name here
+    # Fallback without API keys: scan Kick's mixed-language browse pages and
+    # filter the returned rows by the stream's language locally.
     if cffi_requests is None:
         raise RuntimeError("Add KICK_CLIENT_ID / KICK_CLIENT_SECRET to .env or pip install curl_cffi")
     name = KICK_LANG_NAMES.get(language, language).lower()
-    return [_kick_row(s, language) for s in _kick_web_all()
-            if str(s.get("language", "")).lower() in (name, language)]
+    rows = []
+    for s in _kick_web_all():
+        stream_language = str(s.get("language") or s.get("language_code") or "").lower()
+        # Some browse rows omit language; retain those rather than dropping a live channel.
+        if stream_language and stream_language not in (name, language.lower()):
+            continue
+        rows.append(_kick_row(s, language))
+    return rows
 
 
 def kick_channel_info(slug: str) -> dict:
@@ -220,10 +241,13 @@ def live_by_region(region_key: str, platforms: list[str], min_viewers: int = 0) 
     # No Twitch app of your own? Signed-in users get Twitch listings from Clipper Cloud.
     own_twitch = bool(settings.twitch_client_id and settings.twitch_client_secret)
     if "twitch" in platforms and not own_twitch and cloud.signed_in():
-        try:
-            rows.extend(cloud.live(region_key, ["twitch"], 0)["streams"])
-        except Exception as e:
-            errors.append(f"twitch (Clipper Cloud): {e}")
+        if region.get("all_languages"):
+            errors.append("Twitch all-language discovery needs your own Twitch app; choose a region for Clipper Cloud listings.")
+        else:
+            try:
+                rows.extend(cloud.live(region_key, ["twitch"], 0)["streams"])
+            except Exception as e:
+                errors.append(f"twitch (Clipper Cloud): {e}")
         platforms = [p for p in platforms if p != "twitch"]
 
     def collect(fn, lang, platform, keyword_only=False, **kw):
@@ -236,7 +260,19 @@ def live_by_region(region_key: str, platforms: list[str], min_viewers: int = 0) 
             errors.append(f"{platform} {lang}: {e}")
 
     for p in platforms:
+        if region.get("all_languages") and p == "kick":
+            try:
+                for raw in _kick_web_all():
+                    lang = str(raw.get("language") or raw.get("language_code") or "")
+                    rows.append(_kick_row(raw, lang))
+            except Exception as e:
+                errors.append(f"kick all languages: {e}")
+            continue
+
         fn = twitch_streams if p == "twitch" else kick_streams
+        if region.get("all_languages") and p == "twitch":
+            collect(fn, None, p, pages=4)
+            continue
         for lang in region["languages"]:
             collect(fn, lang, p)
         for lang in region.get("keyword_languages", []):

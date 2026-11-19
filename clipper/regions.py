@@ -8,6 +8,7 @@ English-language streamers from that country (e.g. Indian streamers on English).
 from __future__ import annotations
 
 REGIONS: dict[str, dict] = {
+    "all": {"label": "All languages / regions", "languages": [], "keywords": [], "keyword_languages": [], "all_languages": True},
     "india": {
         "label": "India",
         "languages": ["hi", "ta", "te", "bn", "mr", "kn", "ml", "pa", "gu"],
