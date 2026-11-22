@@ -351,7 +351,7 @@ async function loadConfig() {
   set($("#lKick"), "on", CFG.kick_official ? "Kick API" : "Kick");
   set($("#lAI"), CFG.ai ? "on" : "warn", CFG.ai ? "Hooks: " + CFG.ai_name : "AI hooks off");
   const tools = CFG.tools.ffmpeg && CFG.tools.streamlink;
-  set($("#lTools"), tools ? "on" : "off", tools ? "Recorder" : "Recorder: run ./run.sh");
+  set($("#lTools"), tools ? "on" : "off", tools ? "Recorder" : `Recorder: run ${CFG.os === "windows" ? "run.bat" : "./run.sh"}`);
   $("#setup").hidden = CFG.signed_in || (CFG.twitch_own && CFG.ai);
   $("#setupText").innerHTML = "<b>Sign in with Google</b> to list Twitch streamers and get AI hooks on every clip. Free, no keys or developer accounts.";
   $("#setup button").textContent = "Sign in";
@@ -562,8 +562,10 @@ async function ollama() {
   const has = o.models.some(m => m === model || m.split(":")[0] === model.split(":")[0] && model.indexOf(":") < 0);
   const p = o.pull;
   let html = `<div class="line"><b>Ollama on this computer</b><span class="chip ${o.running ? "cue" : ""}">${o.running ? "Running" : o.installed ? "Installed, not running" : "Not installed"}</span>${o.running ? `<span class="chip">${o.models.length} model${o.models.length === 1 ? "" : "s"}</span>` : ""}</div>`;
-  if (!o.installed && !o.running) html += `<div class="line">Free local AI. In Terminal run <code>brew install ollama</code>, then restart <code>./run.sh</code>, which starts it for you.</div>`;
-  else if (!o.running) html += `<div class="line">Start it with <code>ollama serve</code> or restart <code>./run.sh</code>.</div>`;
+  const win = o.os === "windows", launcher = win ? "run.bat" : "./run.sh";
+  const getOllama = win ? "winget install Ollama.Ollama" : o.os === "mac" ? "brew install ollama" : "curl -fsSL https://ollama.com/install.sh | sh";
+  if (!o.installed && !o.running) html += `<div class="line">Free local AI. In ${win ? "PowerShell" : "Terminal"} run <code>${getOllama}</code>, then restart <code>${launcher}</code>, which starts it for you.</div>`;
+  else if (!o.running) html += `<div class="line">Start it with <code>ollama serve</code> or restart <code>${launcher}</code>.</div>`;
   else if (p.running) {
     const pct = p.total ? Math.round(p.done / p.total * 100) : 0;
     html += `<div class="line">Downloading ${esc(p.model)}: ${esc(p.status)} ${pct ? pct + "%" : ""}</div><div class="bar"><i style="width:${pct}%"></i></div>`;

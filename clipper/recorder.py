@@ -159,13 +159,20 @@ class Recorder:
             keep = []
             for s, e, p in self._index:
                 if e < cutoff:
-                    p.unlink(missing_ok=True)
+                    try:
+                        p.unlink(missing_ok=True)
+                    except OSError:       # Windows: still open elsewhere, the next pass gets it
+                        keep.append((s, e, p))
+                        continue
                 else:
                     keep.append((s, e, p))
             self._index = keep
         for old in self.dir.glob("list_*.csv"):
             if old != self._list and not any(p.name.startswith(f"seg_{old.stem.split('_')[1]}_") for _, _, p in self.entries()):
-                old.unlink(missing_ok=True)
+                try:
+                    old.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     def buffered_seconds(self) -> float:
         e = self.entries()

@@ -32,7 +32,25 @@ cd clipper
 
 `run.sh` installs ffmpeg (through Homebrew) and the Python packages, creates `.env` from `.env.example`, and opens http://localhost:8000.
 
-Linux works too: install `ffmpeg` and Python 3.10+, then run the same script. Windows: use WSL.
+## Quick start (Windows)
+
+In PowerShell or Command Prompt:
+
+```bat
+git clone https://github.com/vinayak0920/clipper.git
+cd clipper
+run.bat
+```
+
+No git? Download the ZIP from GitHub, unzip it and double-click `run.bat`.
+
+`run.bat` installs FFmpeg and Python 3.12 through winget if they are missing, sets up the Python packages, creates `.env` and opens http://localhost:8000. Run `run.bat` again each time you want to start Clipper. Closing the window stops it.
+
+Clips render on your NVIDIA, Intel or AMD graphics when FFmpeg can use it, and on the CPU otherwise.
+
+## Quick start (Linux)
+
+Install `ffmpeg` and Python 3.10 - 3.13, then run `./run.sh`.
 
 ## Setup
 
@@ -44,7 +62,7 @@ Prefer your own keys? Paste them, press **Save changes**, then **Test connection
 |---|---|---|
 | Twitch app (optional when signed in) | List Twitch streamers by region | [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps): turn on two-factor auth on your Twitch account, register an app with redirect `https://localhost`, then copy `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` |
 | Kick app (optional) | Kick's official listing API | [kick.com/settings/developer](https://kick.com/settings/developer). Without it, Clipper reads Kick's public browse feed |
-| AI hooks (optional when signed in) | Hooks, trimming, Hinglish | Free and local: `brew install ollama && ollama pull qwen2.5:7b`. Or set one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY` |
+| AI hooks (optional when signed in) | Hooks, trimming, Hinglish | Free and local: `brew install ollama` (Windows: `winget install Ollama.Ollama`), then `ollama pull qwen2.5:7b`. Or set one of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GROQ_API_KEY`, `GEMINI_API_KEY` |
 
 `AI_PROVIDER=auto` uses your own key first, then Clipper Cloud if you're signed in, then Ollama. Without either, clips still get captions, plus a simple title instead of an AI hook. Any OpenAI-compatible server (LM Studio, vLLM, OpenRouter) works through `OPENAI_BASE_URL`.
 

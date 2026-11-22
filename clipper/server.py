@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import threading
 import time
 from typing import Optional
@@ -25,6 +26,7 @@ app = FastAPI(title="Clipper")
 app.mount("/clips", StaticFiles(directory=str(settings.clips_dir)), name="clips")
 app.mount("/ui", StaticFiles(directory=str(ROOT / "assets")), name="ui")
 STARTED = time.time()
+OS = "windows" if sys.platform == "win32" else "mac" if sys.platform == "darwin" else "linux"
 
 # ------------------------------------------------------------------ settings schema
 # kind: text | secret | select | number | toggle
@@ -105,6 +107,7 @@ def config():
         "ai_name": llm.describe(),
         "sensitivity": settings.sensitivity,
         "tools": {t: bool(shutil.which(t)) for t in ("ffmpeg", "ffprobe", "streamlink")},
+        "os": OS,
     }
 
 
@@ -292,7 +295,7 @@ PULL = {"model": "", "status": "", "done": 0, "total": 0, "error": "", "running"
 
 @app.get("/api/ollama")
 async def ollama_status():
-    info = {"installed": bool(shutil.which("ollama")), "running": False, "models": [], "pull": PULL}
+    info = {"installed": bool(shutil.which("ollama")), "running": False, "models": [], "pull": PULL, "os": OS}
     try:
         async with httpx.AsyncClient(timeout=1.5) as c:
             r = await c.get(f"{llm.OLLAMA_URL}/api/tags")

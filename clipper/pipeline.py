@@ -77,19 +77,45 @@ def _analyze_layout(video: Path, start: float, duration: float, category: str):
 
 
 _encoder = None
+X264 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+_RATE = ["-b:v", "9M", "-maxrate", "12M", "-bufsize", "18M"]
+# Hardware H.264 encoders, several times faster than x264. Tried in order, first that works wins.
+HW_ENCODERS = {
+    "darwin": [["-c:v", "h264_videotoolbox", *_RATE, "-profile:v", "high", "-allow_sw", "1"]],
+    "other": [
+        ["-c:v", "h264_nvenc", "-preset", "p4", *_RATE, "-profile:v", "high"],   # NVIDIA
+        ["-c:v", "h264_qsv", "-preset", "veryfast", *_RATE],                     # Intel
+        ["-c:v", "h264_amf", "-quality", "speed", "-rc", "vbr_peak", *_RATE],    # AMD
+    ],
+}
+
+
+def _encoder_works(enc: list[str]) -> bool:
+    """FFmpeg lists GPU encoders even with no matching GPU, so encode a second of test video to be sure."""
+    try:
+        p = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                            "-f", "lavfi", "-i", "testsrc2=size=1080x1920:rate=30", "-t", "1",
+                            *enc, "-pix_fmt", "yuv420p", "-f", "null", "-"],
+                           capture_output=True, timeout=20, stdin=subprocess.DEVNULL)
+        return p.returncode == 0
+    except Exception:
+        return False
 
 
 def video_encoder() -> list[str]:
-    """Apple's hardware H.264 encoder on Macs (several times faster than x264), x264 elsewhere."""
+    """Hardware H.264 (Apple, NVIDIA, Intel or AMD) when this machine has it, x264 otherwise."""
     global _encoder
     if _encoder is None:
-        _encoder = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
-        if sys.platform == "darwin" and os.getenv("HW_ENCODE", "1") == "1":
+        _encoder = X264
+        if os.getenv("HW_ENCODE", "1") == "1":
             try:
-                out = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True).stdout
-                if "h264_videotoolbox" in out:
-                    _encoder = ["-c:v", "h264_videotoolbox", "-b:v", "9M", "-maxrate", "12M", "-bufsize", "18M",
-                                "-profile:v", "high", "-allow_sw", "1"]
+                listed = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True,
+                                        stdin=subprocess.DEVNULL).stdout
+                for enc in HW_ENCODERS["darwin" if sys.platform == "darwin" else "other"]:
+                    if enc[1] in listed and _encoder_works(enc):
+                        _encoder = enc
+                        log.info("video encoder: %s", enc[1])
+                        break
             except Exception:
                 pass
     return _encoder
@@ -341,7 +367,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
     try:
         render(video_encoder())
     except Exception as e:
-        if "videotoolbox" not in " ".join(video_encoder()):
+        if video_encoder()[1] == "libx264":
             raise
         log.warning("hardware encoder failed, using x264: %s", str(e)[-200:])
         global _encoder

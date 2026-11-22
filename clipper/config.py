@@ -74,7 +74,7 @@ def write_env(updates: dict[str, str]):
     """Update KEY=value lines in .env in place, keep comments and order, append new keys."""
     if not ENV_FILE.exists():
         example = ROOT / ".env.example"
-        ENV_FILE.write_text(example.read_text() if example.exists() else "", encoding="utf-8")
+        ENV_FILE.write_text(example.read_text(encoding="utf-8") if example.exists() else "", encoding="utf-8")
     lines = ENV_FILE.read_text(encoding="utf-8").splitlines()
     left = dict(updates)
     for i, line in enumerate(lines):
