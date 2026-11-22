@@ -42,7 +42,13 @@ cd clipper
 run.bat
 ```
 
-No git? Download the ZIP from GitHub, unzip it and double-click `run.bat`.
+No git? Paste this in PowerShell instead. It downloads the ZIP, unpacks it and starts Clipper:
+
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; iwr -UseBasicParsing https://github.com/vinayak0920/clipper/archive/refs/heads/main.zip -OutFile clipper.zip; Expand-Archive clipper.zip . -Force; cd clipper-main; .\run.bat
+```
+
+Or download the ZIP from GitHub, right-click it, pick Extract All and double-click `run.bat`.
 
 `run.bat` installs FFmpeg and Python 3.12 through winget if they are missing, sets up the Python packages, creates `.env` and opens http://localhost:8000. Run `run.bat` again each time you want to start Clipper. Closing the window stops it.
 

@@ -134,6 +134,24 @@ def _has_cuda() -> bool:
         return False
 
 
+def _filter_path(path: Path, cwd: Path) -> str:
+    """A path FFmpeg's filter parser accepts on every OS.
+
+    A filter graph is unescaped twice, so a Windows drive letter (C:) written as C\\: still
+    reaches the subtitles filter as an option separator and every render fails. The path
+    relative to the render folder has no drive letter; when that is not possible (fonts on
+    another drive) the absolute path is wrapped in quotes, which survive the first pass.
+    """
+    try:
+        rel = os.path.relpath(path, cwd).replace("\\", "/")
+        if not any(c in rel for c in ":'[],;"):
+            return rel
+    except ValueError:            # Windows: different drive, no relative path exists
+        pass
+    p = str(path).replace("\\", "/").replace(":", "\\:")
+    return f"'{p}'"
+
+
 def run(cmd: list[str], cwd: Path | None = None, timeout: float = 90):
     if cmd[0] == "ffmpeg" and "-nostdin" not in cmd:
         cmd = [cmd[0], "-nostdin", *cmd[1:]]
@@ -350,7 +368,7 @@ def make_clip(moment: Moment, recorder, meta: dict, on_status=None, force_keep: 
         hook_y = 240 if game_top else getattr(reframe, "CAM_TOP_H", 700) + 120
         ass += build_title_ass(title, end - start, y=hook_y)
     (out_dir / "captions.ass").write_text(ass, encoding="utf-8")
-    fonts = str(settings.fonts_dir).replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+    fonts = _filter_path(settings.fonts_dir, out_dir)
     # reset timestamps to 0 so caption timing lines up with the cut (stream PTS never start at 0)
     graph = ("[0:v]setpts=PTS-STARTPTS[s0];" + layout.filter_graph().replace("[0:v]", "[s0]")
              + f";[v]subtitles=filename=captions.ass:fontsdir={fonts}[vout]")
